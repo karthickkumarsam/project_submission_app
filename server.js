@@ -72,7 +72,7 @@ app.post("/register", async (req, res) => {
 
         const hashedPassword = await bcrypt.hash(password, 10)
         await collection.doc(email).set({
-            name,
+            name: name || "",
             email,
             role,
             password: hashedPassword,
@@ -144,7 +144,7 @@ app.get('/projects', async (req, res) => {
     try {
         const snapshot = await db.collection('projects').get()
         if(snapshot.empty) return res.json({ projects: [] })
-            
+
         const projects = snapshot.docs.map((doc) => doc.data())
         res.json({ projects })
         
