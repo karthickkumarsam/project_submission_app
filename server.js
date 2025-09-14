@@ -2,7 +2,9 @@ import express from 'express'
 import cors from 'cors'
 import bcrypt from 'bcrypt'
 import admin from 'firebase-admin'
+import multer from 'multer'
 import path from 'path'
+import fs from 'fs'
 import { fileURLToPath } from "url";
 import dotenv from 'dotenv'
 dotenv.config()
@@ -32,6 +34,22 @@ if (!admin.apps.length) {
 const db = admin.firestore()
 const studentCollection = db.collection('students')
 const facultyCollection = db.collection('faculty')
+
+const uploadDir = path.join(process.cwd(), 'public')
+if(!fs.existsSync(uploadDir)) {
+    fs.mkdirSync(uploadDir)
+}
+
+const storage = multer.diskStorage({
+    destination: (req, file, cb) => {
+        cb(null, uploadDir)
+    },
+    filename: (req, file, cb) => {
+        const uniqueName = `${Date.now()}-${file.originalname}`;
+        cb(null, uniqueName)
+    }
+})
+const upload = multer({ storage })
 
 // Health check
 app.get('/', (req, res) => {
@@ -94,6 +112,72 @@ app.post('/login', async (req, res) => {
         res.status(500).json({ message: "Internal server error" })
     }
 })
+
+app.post('/project/submit', upload.single('document'), async (req, res) => {
+    try {
+        const { title, description } = req.body
+        if(!req.file) return res.status(400).json({ message: "No file uploaded" })
+
+        const filePath = `/public/${req.file.filename}`    
+
+        const projectRef = db.collection('projects').doc()
+        await projectRef.set({
+            id: projectRef.id,
+            title,
+            description,
+            documentUrl: filePath,
+            fileType: req.file.mimetype,
+            fileName: req.file.originalname,
+            status: "pending",
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        })
+
+        res.json({ message: "Project submitted successfully", projectId: projectRef.id, documentUrl: filePath })
+        
+    } catch (error) {
+        console.error("Error submitting project:", error)
+        res.status(500).json({ message: "Internal server error" })
+    }
+})
+
+app.get('/projects', async (req, res) => {
+    try {
+        const snapshot = await db.collection('projects').get()
+        if(snapshot.empty) return res.json({ projects: [] })
+            
+        const projects = snapshot.docs.map((doc) => doc.data())
+        res.json({ projects })
+        
+    } catch (error) {
+        console.error("Error fetching projects:", error)
+        res.status(500).json({ message: "Internal server error" })  
+    }
+})
+
+app.put('/project/review/:projectId', async (req, res) => {
+    try {
+        const { projectId } = req.params
+        const { status, reason } = req.body
+
+        if(!['approve', 'reject'].includes(status)) {
+            return res.status(400).json({ message: "Invalid status" })
+        }
+
+        const projectRef = db.collection('projects').doc(projectId)
+        await projectRef.update({
+            status,
+            reviewReason: reason || "",
+            reviewedAt: admin.firestore.FieldValue.serverTimestamp(),
+        })
+
+        res.json({ message: `Project ${status} successfully` })
+        
+    } catch (error) {
+        console.error("Error reviewing project:", error)
+        res.status(500).json({ message: "Internal server error" })
+    }
+})
+
 
 const PORT = process.env.PORT || 3001
 app.listen(PORT, () => {
