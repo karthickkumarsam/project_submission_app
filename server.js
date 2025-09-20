@@ -136,123 +136,186 @@ app.post('/login', async (req, res) => {
 })
 
 app.post('/project/submit', upload.single('document'), async (req, res) => {
-    try {
-        const { title, description, studentId } = req.body
+  try {
+    const { title, description, studentId, projectId } = req.body;
 
-        if (!studentId) return res.status(400).json({ message: "Missing studentId" })
-        if(!req.file) return res.status(400).json({ message: "No file uploaded" })
+    if (!studentId) return res.status(400).json({ message: "Missing studentId" });
+    if (!req.file) return res.status(400).json({ message: "No file uploaded" });
 
-        // Verify student exists
-        const studentDoc = await studentCollection.doc(studentId).get()
-        if (!studentDoc.exists) {
-        return res.status(404).json({ message: "Student not found" })
-        }            
-
-        const filePath = `/public/${req.file.filename}`    
-
-        const projectRef = db.collection('projects').doc()
-        await projectRef.set({
-            id: projectRef.id,
-            title,
-            description,
-            studentId,
-            documentUrl: filePath,
-            fileType: req.file.mimetype,
-            fileName: req.file.originalname,
-            status: "pending",
-            createdAt: admin.firestore.FieldValue.serverTimestamp(),
-        })
-
-        res.json({ message: "Project submitted successfully", projectId: projectRef.id, studentId, documentUrl: filePath })
-        
-    } catch (error) {
-        console.error("Error submitting project:", error)
-        res.status(500).json({ message: "Internal server error" })
+    // Verify student exists
+    const studentDoc = await studentCollection.doc(studentId).get();
+    if (!studentDoc.exists) {
+      return res.status(404).json({ message: "Student not found" });
     }
-})
 
-app.get('/projects', async (req, res) => {
-    try {
-        const snapshot = await db.collection('projects').get()
-        if(snapshot.empty) return res.json({ projects: [] })
+    const filePath = `/public/${req.file.filename}`;
 
-        const projects = snapshot.docs.map((doc) => doc.data())
-        res.json({ projects })
-        
-    } catch (error) {
-        console.error("Error fetching projects:", error)
-        res.status(500).json({ message: "Internal server error" })  
+    let projectRef;
+    if (projectId) {
+      // Existing project
+      projectRef = db.collection('projects').doc(projectId);
+      const projectDoc = await projectRef.get();
+      if (!projectDoc.exists) {
+        return res.status(404).json({ message: "Project not found" });
+      }
+    } else {
+      // First time submission (create project)
+      projectRef = db.collection('projects').doc();
+      await projectRef.set({
+        id: projectRef.id,
+        title,
+        description,
+        studentId,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
     }
-})
 
-app.put('/project/review/:projectId', async (req, res) => {
-    try {
-        const { projectId } = req.params
-        const { status, reason, mark } = req.body
+    // Count existing reviews for this project
+    const reviewSnapshot = await projectRef.collection('reviews').get();
+    const reviewCount = reviewSnapshot.size;
 
-        if(!['approve', 'reject'].includes(status)) {
-            return res.status(400).json({ message: "Invalid status" })
-        }
-
-        const projectRef = db.collection('projects').doc(projectId)
-        await projectRef.update({
-            status,
-            mark,
-            reviewReason: reason || "",
-            reviewedAt: admin.firestore.FieldValue.serverTimestamp(),
-        })
-
-        res.json({ message: `Project ${status} successfully` })
-        
-    } catch (error) {
-        console.error("Error reviewing project:", error)
-        res.status(500).json({ message: "Internal server error" })
+    if (reviewCount >= 3) {
+      return res.status(400).json({ message: "Maximum 3 reviews already submitted" });
     }
-})
 
-// Get projects by studentId
+    const reviewNo = reviewCount + 1;
+    const reviewRef = projectRef.collection('reviews').doc();
+
+    await reviewRef.set({
+      id: reviewRef.id,
+      reviewNo,
+      documentUrl: filePath,
+      fileType: req.file.mimetype,
+      fileName: req.file.originalname,
+      status: "pending",
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    res.json({
+      message: `Review ${reviewNo} submitted successfully`,
+      projectId: projectRef.id,
+      reviewId: reviewRef.id,
+      reviewNo,
+      documentUrl: filePath,
+    });
+
+  } catch (error) {
+    console.error("Error submitting project review:", error);
+    res.status(500).json({ message: "Internal server error" });
+  }
+});
+
+app.get('/faculty/projects', async (req, res) => {
+  try {
+    const snapshot = await db.collection('projects').get();
+    if (snapshot.empty) return res.json({ projects: [] });
+
+    const projects = [];
+    for (const doc of snapshot.docs) {
+      const project = doc.data();
+
+      // fetch reviews subcollection
+      const reviewSnap = await doc.ref.collection('reviews').get();
+      project.reviews = reviewSnap.docs.map(r => r.data());
+
+      projects.push(project);
+    }
+
+    res.json({ projects });
+  } catch (error) {
+    console.error("Error fetching faculty projects:", error);
+    res.status(500).json({ message: "Internal server error" });
+  }
+});
+
+
+app.put('/faculty/project/:projectId/review/:reviewId', async (req, res) => {
+  try {
+    const { projectId, reviewId } = req.params;
+    const { status, reason, mark } = req.body;
+
+    if (!['approve', 'reject'].includes(status)) {
+      return res.status(400).json({ message: "Invalid status" });
+    }
+
+    const reviewRef = db.collection('projects')
+                        .doc(projectId)
+                        .collection('reviews')
+                        .doc(reviewId);
+
+    const reviewDoc = await reviewRef.get();
+    if (!reviewDoc.exists) {
+      return res.status(404).json({ message: "Review not found" });
+    }
+
+    await reviewRef.update({
+      status,
+      mark: mark || null,
+      reviewReason: reason || "",
+      reviewedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    res.json({ message: `Review updated: ${status}` });
+  } catch (error) {
+    console.error("Error reviewing project:", error);
+    res.status(500).json({ message: "Internal server error" });
+  }
+});
+
+
+// Get projects (with reviews) by studentId
 app.get('/projects/student/:studentId', async (req, res) => {
   try {
-    const { studentId } = req.params
+    const { studentId } = req.params;
 
-    if (!studentId) return res.status(400).json({ message: "Missing studentId" })
+    if (!studentId) return res.status(400).json({ message: "Missing studentId" });
 
-    const snapshot = await db.collection('projects').where("studentId", "==", studentId).get()
+    const snapshot = await db.collection('projects')
+                             .where("studentId", "==", studentId)
+                             .get();
 
     if (snapshot.empty) {
-      return res.json({ projects: [] })
+      return res.json({ projects: [] });
     }
 
-    const projects = snapshot.docs.map((doc) => doc.data())
+    const projects = [];
+    for (const doc of snapshot.docs) {
+      const projectData = doc.data();
 
-    res.json({ projects })
+      // Fetch all reviews under this project
+      const reviewSnap = await doc.ref.collection('reviews').get();
+      projectData.reviews = reviewSnap.docs.map(r => r.data());
 
+      projects.push(projectData);
+    }
+
+    res.json({ projects });
   } catch (error) {
-    console.error("Error fetching projects by studentId:", error)
-    res.status(500).json({ message: "Internal server error" })
+    console.error("Error fetching projects by studentId:", error);
+    res.status(500).json({ message: "Internal server error" });
   }
-})
+});
+
 
 // Get single project by projectId
-app.get('/project/:projectId', async (req, res) => {
+app.get('/faculty/project/:projectId', async (req, res) => {
   try {
-    const { projectId } = req.params
+    const { projectId } = req.params;
 
-    if (!projectId) return res.status(400).json({ message: "Missing projectId" })
+    const projectDoc = await db.collection('projects').doc(projectId).get();
+    if (!projectDoc.exists) return res.status(404).json({ message: "Project not found" });
 
-    const projectDoc = await db.collection('projects').doc(projectId).get()
+    const reviewSnap = await projectDoc.ref.collection('reviews').get();
+    const project = projectDoc.data();
+    project.reviews = reviewSnap.docs.map(r => r.data());
 
-    if (!projectDoc.exists) {
-      return res.status(404).json({ message: "Project not found" })
-    }
-
-    res.json({ project: projectDoc.data() })
-
+    res.json({ project });
   } catch (error) {
-    console.error("Error fetching single project:", error)
-    res.status(500).json({ message: "Internal server error" })
+    console.error("Error fetching project:", error);
+    res.status(500).json({ message: "Internal server error" });
   }
-})
+});
+
 
 
 const PORT = process.env.PORT || 3001
